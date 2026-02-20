@@ -348,3 +348,62 @@ make expert2     # rolling backtest + artifacts/submission_expert.csv
 Outputs:
 - `artifacts/backtest_metrics.csv`
 - `artifacts/submission_expert.csv`
+
+---
+
+## 🪟 Windows automation scripts (.ps1 + .bat)
+
+To run everything end-to-end on Windows (Docker Desktop), use:
+
+- PowerShell (recommended): `scripts/run_full_pipeline.ps1`
+- Batch: `scripts/run_full_pipeline.bat`
+
+### How to use
+1) Put ALL Kaggle CSV files into:
+```
+scripts/csv_source/
+```
+
+2) Run:
+PowerShell:
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\scriptsun_full_pipeline.ps1
+```
+
+Batch:
+```bat
+scriptsun_full_pipeline.bat
+```
+
+Outputs:
+- `artifacts/submission_ensemble.csv` (best final submission)
+- `artifacts/submission_expert.csv` (single-model expert submission)
+- `artifacts/backtest_metrics.csv`
+- `artifacts/hpo_best_params.json`
+
+---
+
+## 🔧 Hyperparameter Tuning (HPO)
+
+Run quick HPO (TrainValidationSplit) on a season-based holdout:
+
+```bash
+make hpo
+```
+
+This writes:
+- `artifacts/hpo_best_params.json`
+
+---
+
+## 🧩 Ensemble export (LogReg + GBT)
+
+Train both models (using HPO params if present) and export an ensemble submission:
+
+```bash
+make ensemble
+```
+
+Output:
+- `artifacts/submission_ensemble.csv`

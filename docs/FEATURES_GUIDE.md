@@ -39,3 +39,6 @@ This repo ingests 20+ CSVs for Men's and Women's competitions. Here are **high-s
 ## Anti-leakage rules
 - Do NOT use tournament game results to build features for predicting that tournament.
 - Use season-based splits for validation (rolling backtests).
+
+## Ensemble tip
+- Blend GBT + Logistic Regression (alpha ~ 0.6–0.7) for more stable LogLoss.

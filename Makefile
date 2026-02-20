@@ -45,3 +45,12 @@ sos:
 
 expert2:
 	docker compose run --rm spark-submit python jobs/07_backtest_and_export_blend.py
+
+hpo:
+	docker compose run --rm spark-submit python jobs/11_hpo_backtest.py
+
+ensemble:
+	docker compose run --rm spark-submit python jobs/12_train_ensemble_export.py
+
+full:
+	docker compose run --rm spark-submit python jobs/07_backtest_and_export_blend.py

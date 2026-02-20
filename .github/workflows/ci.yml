@@ -28,3 +28,7 @@ jobs:
       - name: Compile (syntax check)
         run: |
           python -m compileall -q jobs src
+
+      - name: Validate docker compose file
+        run: |
+          docker compose config
