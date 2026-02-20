@@ -368,12 +368,14 @@ scripts/csv_source/
 PowerShell:
 ```powershell
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-.\scriptsun_full_pipeline.ps1
+.\scripts
+un_full_pipeline.ps1
 ```
 
 Batch:
 ```bat
-scriptsun_full_pipeline.bat
+scripts
+un_full_pipeline.bat
 ```
 
 Outputs:
@@ -407,3 +409,37 @@ make ensemble
 
 Output:
 - `artifacts/submission_ensemble.csv`
+
+---
+
+## 🧾 Detailed logging (local or docker)
+
+This project writes detailed logs to:
+- `artifacts/logs/<mode>_run_<timestamp>.log`
+
+Each line includes the run mode (`local` or `docker`) for easy debugging.
+
+---
+
+## ⚡ Local run (no Docker) — FAST
+
+For a quick local validation run (no MinIO/S3, no Docker), use:
+
+1) Put Kaggle CSV files into:
+```
+scripts/csv_source/
+```
+
+2) Run:
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\scriptsun_local_fast.ps1
+```
+
+Outputs:
+- `artifacts/submission_expert.csv`
+- `artifacts/backtest_metrics.csv`
+- `artifacts/logs/*.log`
+
+Notes:
+- This script uses `local_overrides/` via `PYTHONPATH` so you do not have to change any project source file.
