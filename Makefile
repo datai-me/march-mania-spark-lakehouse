@@ -33,3 +33,15 @@ rolling:
 
 expert:
 	docker compose run --rm spark-submit python jobs/07_backtest_and_export_blend.py
+
+seeds:
+	docker compose run --rm spark-submit python jobs/08_build_silver_seeds.py
+
+massey:
+	docker compose run --rm spark-submit python jobs/09_build_silver_massey.py
+
+sos:
+	docker compose run --rm spark-submit python jobs/10_build_silver_sos.py
+
+expert2:
+	docker compose run --rm spark-submit python jobs/07_backtest_and_export_blend.py

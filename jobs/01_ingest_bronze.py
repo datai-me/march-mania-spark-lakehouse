@@ -1,15 +1,14 @@
-"""Job 01 — Ingest Kaggle CSV files into the Bronze layer (Parquet) in MinIO.
+"""Job 01 — Ingest **all** Kaggle CSV files into Bronze (Parquet) in MinIO.
+
+This is enterprise-style ingestion:
+- It scans `data/input/` for `*.csv`
+- Uses a dataset registry to map filenames → lake paths (men/women/reference/etc.)
+- Unknown CSVs are still ingested under `bronze/.../misc/<filename_stem>/`
 
 Why:
-- CSV is slow and expensive to read repeatedly.
-- Parquet is columnar, compressed, and Spark-friendly.
-- Bronze is immutable: if you need to re-run, overwrite the Bronze dataset for that competition run.
-
-Input:
-- CSV files located under /opt/project/data/input (mounted from ./data/input)
-
-Output:
-- s3a://<bucket>/bronze/march_mania/<dataset_name>/
+- Kaggle March Mania packs include many CSVs (20+). This job ingests them all in one run.
+- Parquet is faster and cheaper for repeated reads.
+- Bronze is treated as raw (minimal transforms).
 
 Run:
     docker compose run --rm spark-submit python jobs/01_ingest_bronze.py
@@ -20,33 +19,30 @@ from pathlib import Path
 from pyspark.sql import functions as F
 
 from src.common.spark import build_spark
-from src.common.paths import LOCAL_INPUT_DIR, bronze_path
+from src.common.paths import LOCAL_INPUT_DIR, bronze_path, bronze_misc_path
+from src.common.datasets import spec_for_filename
 from src.common.logging import get_logger
 
 logger = get_logger(__name__)
 
 
-# A minimal mapping of expected Kaggle file names to logical dataset names.
-# Add/rename to match the actual files you downloaded for the competition.
-DATASETS = {
-    "MRegularSeasonCompactResults.csv": "regular_season_compact_results",
-    "MTeams.csv": "teams",
-    # Add more Kaggle files here as needed:
-    # "MNCAATourneyCompactResults.csv": "tourney_compact_results",
-    # "MSeasons.csv": "seasons",
-}
+def _safe_stem(name: str) -> str:
+    return name.replace(".csv", "").replace(" ", "_").lower()
 
 
 def main() -> None:
     spark = build_spark("march-mania-01-bronze")
 
     input_dir = Path(LOCAL_INPUT_DIR)
+    csv_files = sorted(input_dir.glob("*.csv"))
 
-    for filename, dataset_name in DATASETS.items():
-        file_path = input_dir / filename
-        if not file_path.exists():
-            logger.warning("Missing input file: %s (skip)", file_path)
-            continue
+    if not csv_files:
+        logger.warning("No CSV files found under %s. Put Kaggle files into data/input/.", input_dir)
+        return
+
+    for file_path in csv_files:
+        filename = file_path.name
+        spec = spec_for_filename(filename)
 
         logger.info("Reading CSV: %s", file_path)
 
@@ -57,17 +53,21 @@ def main() -> None:
             .csv(str(file_path))
         )
 
-        # Optional: basic cleanup — trim string columns to avoid weird trailing spaces.
+        # Trim string columns
         for c, t in df.dtypes:
             if t == "string":
                 df = df.withColumn(c, F.trim(F.col(c)))
 
-        out_path = bronze_path(dataset_name)
-        logger.info("Writing Bronze Parquet: %s", out_path)
+        if spec:
+            out_path = f"{bronze_path(spec.lake_subpath)}"
+        else:
+            out_path = bronze_misc_path(_safe_stem(filename))
+            logger.warning("Unknown CSV '%s' → ingesting to %s", filename, out_path)
 
+        logger.info("Writing Bronze Parquet: %s", out_path)
         df.write.mode("overwrite").parquet(out_path)
 
-    logger.info("Bronze ingestion complete.")
+    logger.info("Bronze ingestion complete. Files ingested=%d", len(csv_files))
 
 
 if __name__ == "__main__":

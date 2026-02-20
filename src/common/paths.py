@@ -25,3 +25,7 @@ def silver_path(dataset: str) -> str:
 
 def gold_path(dataset: str) -> str:
     return f"{GOLD_PREFIX}/{dataset}"
+
+
+def bronze_misc_path(stem: str) -> str:
+    return f"{BRONZE_PREFIX}/misc/{stem}"

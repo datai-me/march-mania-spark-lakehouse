@@ -1,15 +1,8 @@
-"""Job 06 — Build rolling momentum features (Silver).
-
-We create:
-1) per-team-per-game rolling features (causal)
-2) per-team-per-season last-available rolling features (for submissions without DayNum)
-
-Inputs:
-- Bronze regular season compact results
+"""Job 06 — Build rolling momentum features (Silver), league-aware.
 
 Outputs:
-- s3a://<bucket>/silver/march_mania/rolling_per_game/
-- s3a://<bucket>/silver/march_mania/rolling_last_per_season/
+- s3a://<bucket>/silver/march_mania/<league>/rolling_per_game/
+- s3a://<bucket>/silver/march_mania/<league>/rolling_last_per_season/
 
 Run:
     docker compose run --rm spark-submit python jobs/06_build_silver_rolling.py
@@ -31,29 +24,32 @@ def main() -> None:
     spark = build_spark("march-mania-06-silver-rolling")
 
     cfg = yaml.safe_load(open("/opt/project/conf/pipeline.yml", "r", encoding="utf-8"))
-    last_n = int(cfg.get("rolling", {}).get("window_last_n_games", 10))
+    league = str(cfg.get("competition", {}).get("league", "M")).upper()
+    if league not in {"M", "W"}:
+        raise ValueError("competition.league must be 'M' or 'W'")
 
-    regular = spark.read.parquet(bronze_path("regular_season_compact_results"))
+    last_n = int(cfg.get("rolling", {}).get("window_last_n_games", 10))
+    bronze_ds = "m/regular_season/compact" if league == "M" else "w/regular_season/compact"
+    regular = spark.read.parquet(bronze_path(bronze_ds))
 
     long_games = build_long_game_table(regular)
     roll = build_rolling_features(long_games, last_n=last_n)
 
-    out1 = silver_path("rolling_per_game")
+    out1 = silver_path(f"{league}/rolling_per_game")
     logger.info("Writing Silver rolling per game: %s", out1)
     roll.write.mode("overwrite").parquet(out1)
 
-    # Build last rolling per team-season (latest DayNum row)
     w = Window.partitionBy("Season", "TeamID").orderBy(F.col("DayNum").desc())
     last = (roll
             .withColumn("rn", F.row_number().over(w))
             .filter(F.col("rn") == 1)
             .drop("rn", "OpponentID", "PointsFor", "PointsAgainst", "Win", "PointDiff"))
 
-    out2 = silver_path("rolling_last_per_season")
+    out2 = silver_path(f"{league}/rolling_last_per_season")
     logger.info("Writing Silver rolling last per season: %s", out2)
     last.write.mode("overwrite").parquet(out2)
 
-    logger.info("Silver rolling complete. per_game=%d, last=%d", roll.count(), last.count())
+    logger.info("Silver rolling complete. league=%s per_game=%d last=%d", league, roll.count(), last.count())
 
 
 if __name__ == "__main__":

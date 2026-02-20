@@ -17,6 +17,10 @@ FEATURE_COLS = [
     "EloDiff",
     "RollWinRateDiff",
     "RollAvgPointDiffDiff",
+    "SeedDiff",
+    "MasseyDiff",
+    "SOSWinRateDiff",
+    "SOSEloDiff",
 ]
 
 

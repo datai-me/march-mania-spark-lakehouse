@@ -1,5 +1,6 @@
 # Pipeline configuration (edit for experiments)
 competition:
+  league: "M"  # M for Men, W for Women
   name: "march-machine-learning-mania-2026"
 
 spark:

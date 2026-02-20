@@ -1,10 +1,7 @@
-"""Job 05 — Compute season-scoped ELO ratings (Silver).
-
-Inputs:
-- Bronze regular season compact results
+"""Job 05 — Compute season-scoped ELO ratings (Silver), league-aware.
 
 Outputs:
-- s3a://<bucket>/silver/march_mania/elo_ratings/
+- s3a://<bucket>/silver/march_mania/<league>/elo_ratings/
 
 Run:
     docker compose run --rm spark-submit python jobs/05_build_silver_elo.py
@@ -24,8 +21,12 @@ def main() -> None:
     spark = build_spark("march-mania-05-silver-elo")
 
     cfg = yaml.safe_load(open("/opt/project/conf/pipeline.yml", "r", encoding="utf-8"))
+    league = str(cfg.get("competition", {}).get("league", "M")).upper()
+    if league not in {"M", "W"}:
+        raise ValueError("competition.league must be 'M' or 'W'")
 
-    regular = spark.read.parquet(bronze_path("regular_season_compact_results"))
+    bronze_ds = "m/regular_season/compact" if league == "M" else "w/regular_season/compact"
+    regular = spark.read.parquet(bronze_path(bronze_ds))
 
     elo_cfg = cfg.get("elo", {})
     elo = build_elo_per_season(
@@ -34,11 +35,11 @@ def main() -> None:
         k_factor=float(elo_cfg.get("k_factor", 20.0)),
     )
 
-    out_path = silver_path("elo_ratings")
+    out_path = silver_path(f"{league}/elo_ratings")
     logger.info("Writing Silver ELO ratings: %s", out_path)
     elo.write.mode("overwrite").parquet(out_path)
 
-    logger.info("Silver ELO complete. Rows=%d", elo.count())
+    logger.info("Silver ELO complete. league=%s rows=%d", league, elo.count())
 
 
 if __name__ == "__main__":

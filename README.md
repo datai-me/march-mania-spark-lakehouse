@@ -317,3 +317,34 @@ docker compose run --rm spark-submit python jobs/07_backtest_and_export_blend.py
 Edit:
 
 - `conf/pipeline.yml` (ELO K-factor, rolling window size, model parameters, backtest range)
+
+---
+
+## League (Men/Women)
+
+This repo supports both **Men's** and **Women's** datasets.
+
+Set the league in:
+- `conf/pipeline.yml` → `competition.league: "M"` or `"W"`
+
+Then run the same pipeline (Bronze → Silver → Gold → Expert).
+
+---
+
+## Recommended full pipeline (Men, Kaggle-competitive)
+
+```bash
+make bronze
+make silver
+make elo
+make rolling
+make seeds
+make massey      # men only (uses MMasseyOrdinals.csv)
+make sos
+make gold
+make expert2     # rolling backtest + artifacts/submission_expert.csv
+```
+
+Outputs:
+- `artifacts/backtest_metrics.csv`
+- `artifacts/submission_expert.csv`
