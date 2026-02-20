@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Data
+data/input/*
+!data/input/.gitkeep
+
+# Artifacts
+artifacts/*
+!artifacts/.gitkeep
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

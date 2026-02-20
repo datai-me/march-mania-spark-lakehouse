@@ -1,0 +1,5 @@
+# Optional: for local utilities (not required inside Spark docker image)
+# pyspark is already provided by the Spark Docker image.
+pandas>=2.0.0
+pyarrow>=14.0.0
+scikit-learn>=1.4.0

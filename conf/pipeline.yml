@@ -1,0 +1,33 @@
+# Pipeline configuration (edit for experiments)
+competition:
+  name: "march-machine-learning-mania-2026"
+
+spark:
+  shuffle_partitions: 64
+  adaptive_enabled: true
+
+elo:
+  initial_rating: 1500.0
+  k_factor: 20.0
+
+rolling:
+  window_last_n_games: 10
+
+modeling:
+  # Blend: final_pred = alpha * gbt + (1-alpha) * logreg
+  blend_alpha_gbt: 0.65
+  gbt:
+    max_iter: 200
+    max_depth: 5
+    step_size: 0.1
+    subsampling_rate: 0.8
+  logreg:
+    max_iter: 80
+    reg_param: 0.05
+    elastic_net_param: 0.0
+
+backtest:
+  # Rolling season backtest:
+  # train <= season-1, validate = season
+  min_train_season: 2003
+  max_val_season: 2025
