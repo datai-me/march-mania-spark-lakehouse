@@ -433,7 +433,8 @@ scripts/csv_source/
 2) Run:
 ```powershell
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-.\scriptsun_local_fast.ps1
+.\scripts
+un_local_fast.ps1
 ```
 
 Outputs:
@@ -443,3 +444,26 @@ Outputs:
 
 Notes:
 - This script uses `local_overrides/` via `PYTHONPATH` so you do not have to change any project source file.
+
+---
+
+## 🧱 Local run (no Docker) — FULL
+
+For a complete local run (includes rolling, SOS, HPO, ensemble):
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\scriptsun_local_full.ps1
+```
+
+Requirements:
+- Put all CSV files in `scripts/csv_source/`
+- Windows + Python installed
+- Script will create `venv/` and install `pyspark` + `pyyaml`
+
+Outputs:
+- `artifacts/submission_ensemble.csv`
+- `artifacts/submission_expert.csv`
+- `artifacts/backtest_metrics.csv`
+- `artifacts/hpo_best_params.json`
+- `artifacts/logs/*.log`
