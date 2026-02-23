@@ -20,9 +20,9 @@ artifacts/*
 .DS_Store
 Thumbs.db
 
-# Ignorer tous les .jar dans le dossier jars
-jars/*.jar
+# Ignore JAR files in jars folder
+/jars/**/*.jar
 
-# Ignorer tous les .csv dans scripts/cources
-.scripts/csv_source/*.csv
+# Ignore CSV files in scripts/csv_source
+/scripts/csv_source/**/*.csv
 
