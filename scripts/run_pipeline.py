@@ -1,153 +1,113 @@
 """
-Pipeline Runner — Exécute les jobs Spark en mode Docker OU local (dual-mode).
+Pipeline runner that submits Spark jobs with required cluster + S3A + py-files settings.
 
-Détection automatique du runtime :
-  - Docker  : SPARK_HOME=/opt/spark (dans le conteneur spark-submit)
-  - Local   : SPARK_HOME défini dans l'environnement, ou spark-submit dans le PATH
-
-Usage :
-    python jobs/run_pipeline.py             # liste les jobs disponibles
-    python jobs/run_pipeline.py 1 10        # jobs 01 à 10
-    python jobs/run_pipeline.py 3           # job 03 uniquement
-    python jobs/run_pipeline.py 1 3 7 12    # jobs 01, 03, 07, 12 (liste libre)
-
-Variables d'environnement :
-    SPARK_MASTER    url du master (défaut : spark://spark-master:7077 en Docker,
-                    local[*] en mode local)
-    PIPELINE_MODE   forcer "docker" ou "local" (optionnel)
+Usage:
+  python jobs/run_pipeline.py --list 1,2,5,6,3,4
+  python jobs/run_pipeline.py 1 4
 """
 
 import os
+import re
 import sys
-import time
 import subprocess
 from pathlib import Path
 
+
 JOBS_DIR = Path(__file__).parent
 
-# ── Détection automatique du runtime ──────────────────────────────────────────
-
-def detect_mode() -> str:
-    """
-    Retourne 'docker' si on tourne dans le conteneur spark-submit,
-    'local' sinon. Peut être forcé via la variable PIPELINE_MODE.
-    """
-    forced = os.environ.get("PIPELINE_MODE", "").lower()
-    if forced in {"docker", "local"}:
-        return forced
-    # Dans le conteneur, SPARK_HOME est fixé à /opt/spark
-    return "docker" if os.environ.get("SPARK_HOME") == "/opt/spark" else "local"
+SPARK_MASTER = os.environ.get("SPARK_MASTER_URL", "spark://spark-master:7077")
+PYFILES = "/opt/project/src.zip"
 
 
-def get_spark_submit_cmd(mode: str) -> list[str]:
-    """
-    Retourne la commande spark-submit adaptée au mode.
-    - Docker : chemin absolu dans le conteneur
-    - Local  : cherche spark-submit dans SPARK_HOME ou dans le PATH
-    """
-    if mode == "docker":
-        return ["/opt/spark/bin/spark-submit", "--master", "spark://spark-master:7077"]
-
-    # Mode local : utilise SPARK_HOME si défini, sinon cherche dans le PATH
-    spark_home = os.environ.get("SPARK_HOME")
-    spark_submit = str(Path(spark_home) / "bin" / "spark-submit") if spark_home else "spark-submit"
-    master = os.environ.get("SPARK_MASTER", "local[*]")
-    return [spark_submit, "--master", master]
-
-
-# ── Découverte des jobs ────────────────────────────────────────────────────────
-
-def discover_jobs() -> dict[int, str]:
-    """Retourne {numéro: nom_fichier} trié, en excluant les scripts utilitaires."""
+def discover_jobs():
     jobs = {}
     for file in JOBS_DIR.glob("*.py"):
-        if file.stem.startswith("run_"):
+        if file.name == "run_pipeline.py":
             continue
-        prefix = file.name.split("_", 1)[0]
-        if prefix.isdigit():
-            jobs[int(prefix)] = file.name
+        m = re.match(r"^(\d+)_.*\.py$", file.name)
+        if m:
+            jobs[int(m.group(1))] = file.name
     return dict(sorted(jobs.items()))
 
 
-# ── Exécution d'un job ────────────────────────────────────────────────────────
+def spark_submit_args(app_path: str):
+    return [
+        "/opt/spark/bin/spark-submit",
+        "--master", SPARK_MASTER,
 
-def run_job(job_file: str, spark_cmd: list[str]) -> bool:
-    """Lance un job et retourne True si succès."""
-    print(f"\n{'─' * 60}")
-    print(f"  ▶  {job_file}")
-    print(f"{'─' * 60}")
-    start = time.time()
+        # S3A/MinIO (stable)
+        "--conf", "spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem",
+        "--conf", "spark.hadoop.fs.s3a.path.style.access=true",
+        "--conf", f"spark.hadoop.fs.s3a.endpoint={os.environ.get('MINIO_ENDPOINT','http://minio:9000')}",
+        "--conf", f"spark.hadoop.fs.s3a.access.key={os.environ.get('MINIO_ACCESS_KEY','admin')}",
+        "--conf", f"spark.hadoop.fs.s3a.secret.key={os.environ.get('MINIO_SECRET_KEY','admin123')}",
+        "--conf", "spark.hadoop.fs.s3a.connection.ssl.enabled=false",
 
-    result = subprocess.run(
-        [*spark_cmd, str(JOBS_DIR / job_file)],
-        check=False,
-    )
+        # Python
+        "--conf", "spark.pyspark.python=python",
+        "--conf", "spark.pyspark.driver.python=python",
+        "--conf", "spark.executorEnv.PYTHONPATH=/opt/project/src.zip:/opt/project",
 
-    elapsed = time.time() - start
-    if result.returncode == 0:
-        print(f"  ✅  {job_file} — {elapsed:.1f}s")
-        return True
-    else:
-        print(f"  ❌  {job_file} — ÉCHEC (code {result.returncode}) après {elapsed:.1f}s")
-        return False
+        # Logging
+        "--conf", "spark.driver.extraJavaOptions=-Dlog4j.configurationFile=/opt/project/conf/log4j2.properties",
+        "--conf", "spark.executor.extraJavaOptions=-Dlog4j.configurationFile=/opt/project/conf/log4j2.properties",
 
+        # Ship project code to executors
+        "--py-files", PYFILES,
 
-# ── Parsing des arguments CLI ──────────────────────────────────────────────────
-
-def parse_args(args: list[str]) -> list[int]:
-    """
-    Interprète les arguments :
-        "3"       → [3]
-        "1 10"    → [1, 2, ..., 10]   (plage continue si exactement 2 args)
-        "1 3 7"   → [1, 3, 7]         (liste libre si 3+ args)
-    """
-    if len(args) == 1:
-        return [int(args[0])]
-    if len(args) == 2:
-        return list(range(int(args[0]), int(args[1]) + 1))
-    return [int(a) for a in args]
+        # App
+        app_path,
+    ]
 
 
-# ── Main ───────────────────────────────────────────────────────────────────────
+def run_job(job_file: str):
+    app = str(JOBS_DIR / job_file)
+    print(f"\n=== Running {job_file} ===", flush=True)
+    args = spark_submit_args(app)
+    rc = subprocess.call(args)
+    if rc != 0:
+        print(f"❌ Job failed: {job_file}", flush=True)
+        sys.exit(rc)
+    print(f"✅ Completed: {job_file}", flush=True)
 
-def main() -> None:
-    mode = detect_mode()
-    spark_cmd = get_spark_submit_cmd(mode)
+
+def parse_list_arg(s: str):
+    return [int(x.strip()) for x in s.split(",") if x.strip()]
+
+
+def main():
     jobs = discover_jobs()
-
     if not jobs:
-        print(f"Aucun job trouvé dans {JOBS_DIR}")
+        print("No numbered jobs found.")
         sys.exit(1)
 
     args = sys.argv[1:]
     if not args:
-        print(f"\n🔧  Mode détecté : {mode.upper()}")
-        print(f"    spark-submit : {' '.join(spark_cmd)}\n")
-        print("Jobs disponibles :\n")
+        print("Available jobs:")
         for k, v in jobs.items():
-            print(f"  {k:02d}  {v}")
-        print("\nUsage :")
-        print("  python run_pipeline.py 1 12      # pipeline complet")
-        print("  python run_pipeline.py 3         # job unique")
-        print("  python run_pipeline.py 1 3 7 12  # liste libre")
+            print(f"{k:02d} -> {v}")
+        print("\nRun list : python jobs/run_pipeline.py --list 1,2,5,6,3,4")
+        print("Run range: python jobs/run_pipeline.py 1 4")
         sys.exit(0)
 
-    to_run = parse_args(args)
-    print(f"\n🔧  Mode : {mode.upper()} | Jobs : {to_run}")
+    if args[0] == "--list":
+        order = parse_list_arg(args[1])
+        for n in order:
+            if n not in jobs:
+                print(f"⚠️ Job {n:02d} not found, skipping")
+                continue
+            run_job(jobs[n])
+        print("\n🎯 Pipeline completed.")
+        return
 
-    total_start = time.time()
-    for num in to_run:
-        if num not in jobs:
-            print(f"⚠️  Job {num:02d} introuvable — ignoré.")
-            continue
-        if not run_job(jobs[num], spark_cmd):
-            print(f"\n⛔  Pipeline interrompu au job {num:02d}.")
-            sys.exit(1)
-
-    elapsed = time.time() - total_start
-    print(f"\n{'═' * 60}")
-    print(f"  🎯  Terminé en {elapsed:.1f}s  ({mode.upper()})")
-    print(f"{'═' * 60}\n")
+    start = int(args[0])
+    end = int(args[1]) if len(args) > 1 else start
+    for n in range(start, end + 1):
+        if n in jobs:
+            run_job(jobs[n])
+        else:
+            print(f"⚠️ Job {n:02d} not found, skipping")
+    print("\n🎯 Pipeline completed.")
 
 
 if __name__ == "__main__":
