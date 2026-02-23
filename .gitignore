@@ -19,3 +19,9 @@ artifacts/*
 # OS
 .DS_Store
 Thumbs.db
+
+# jars and csv
+.jar
+.csv
+.jars/
+.scripts/csv_source

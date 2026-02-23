@@ -1,19 +1,19 @@
-"""Job 09 — Build Silver Massey consensus rankings (Men only).
+"""
+Job 09 — Silver Massey : consensus des rankings (Hommes uniquement)
+═════════════════════════════════════════════════════════════════════
+Agrège les ordinals Massey (plusieurs systèmes de ranking) en un consensus
+par saison et par équipe (moyenne des rangs). Disponible uniquement pour la
+compétition masculine (MMasseyOrdinals.csv).
 
-If the file is not present in Bronze, the job logs a warning and exits.
+Sortie : silver/march_mania/M/massey_consensus/
 
-Outputs:
-- s3a://<bucket>/silver/march_mania/M/massey_consensus/
-
-Run:
+Usage :
     docker compose run --rm spark-submit python jobs/09_build_silver_massey.py
 """
 
-from pyspark.sql.utils import AnalysisException
-
-from src.common.spark import build_spark
-from src.common.paths import bronze_path, silver_path
 from src.common.logging import get_logger
+from src.common.paths import bronze_path, silver_path
+from src.common.spark import build_spark
 from src.features.massey import build_massey_consensus
 
 logger = get_logger(__name__)
@@ -23,18 +23,17 @@ def main() -> None:
     spark = build_spark("march-mania-09-silver-massey")
 
     try:
-        massey = spark.read.parquet(bronze_path("m/rankings/massey_ordinals"))
+        massey_raw = spark.read.parquet(bronze_path("m/rankings/massey_ordinals"))
     except Exception as e:
-        logger.warning("Massey ordinals not found in Bronze (did you ingest MMasseyOrdinals.csv?). Skip. err=%s", e)
+        # Non-bloquant : le job suivant utilisera MasseyDiff = null
+        logger.warning("MMasseyOrdinals.csv absent du Bronze — job ignoré. (%s)", e)
         return
 
-    consensus = build_massey_consensus(massey)
+    consensus = build_massey_consensus(massey_raw)
 
     out_path = silver_path("M/massey_consensus")
-    logger.info("Writing Silver Massey consensus: %s", out_path)
     consensus.write.mode("overwrite").parquet(out_path)
-
-    logger.info("Silver Massey complete. rows=%d", consensus.count())
+    logger.info("Massey consensus écrit — lignes=%d → %s", consensus.count(), out_path)
 
 
 if __name__ == "__main__":

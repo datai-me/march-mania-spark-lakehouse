@@ -1,15 +1,18 @@
-"""ELO feature engineering for NCAA match prediction.
+"""
+elo.py — Ratings ELO par saison (Pandas UDF)
+═════════════════════════════════════════════
+Calcule un rating ELO réinitialisé à chaque saison, à partir des résultats
+de saison régulière triés par DayNum (ordre chronologique garanti).
 
-We compute **season-scoped ELO** (reset each season) using regular season results.
+Pourquoi ELO ?
+    - Capture la force relative de chaque équipe en un seul scalaire.
+    - Simple, explicable, fort signal pour LogLoss.
+    - Robuste face aux équipes rares (rating initial = fallback naturel).
 
-Why ELO?
-- Captures team strength in a single number.
-- Often provides a strong uplift in LogLoss competitions.
-
-Implementation notes (local / docker):
-- Kaggle March Mania datasets are not huge, so we can safely compute ELO per season
-  using a Pandas UDF grouped by Season.
-- This is reproducible and explainable (great for portfolio/exam).
+Implémentation :
+    - Pandas UDF groupée par saison → scalable sans collecte sur le driver.
+    - Tri par DayNum dans le UDF → anti-leakage garanti (pas de futur utilisé).
+    - Résultat : un rating final par équipe à la FIN de la saison régulière.
 """
 
 from __future__ import annotations
@@ -19,84 +22,100 @@ from typing import Iterator, Tuple
 import pandas as pd
 from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
-from pyspark.sql.types import (
-    StructType, StructField, IntegerType, DoubleType
-)
+from pyspark.sql.types import DoubleType, IntegerType, StructField, StructType
 
+# Colonnes requises en entrée
+_REQUIRED = {"Season", "DayNum", "WTeamID", "LTeamID"}
+
+
+# ── Formules ELO ──────────────────────────────────────────────────────────────
 
 def _expected_score(ra: float, rb: float) -> float:
+    """Probabilité de victoire de A contre B selon la formule ELO standard."""
     return 1.0 / (1.0 + 10.0 ** ((rb - ra) / 400.0))
 
 
-def _update(ra: float, rb: float, sa: float, k: float) -> Tuple[float, float]:
-    ea = _expected_score(ra, rb)
-    eb = 1.0 - ea
-    ra2 = ra + k * (sa - ea)
-    rb2 = rb + k * ((1.0 - sa) - eb)
-    return ra2, rb2
+def _update_ratings(ra: float, rb: float, winner_score: float, k: float) -> Tuple[float, float]:
+    """
+    Met à jour les ratings après un match.
 
+    Args:
+        ra, rb          : ratings actuels de A (vainqueur) et B (perdant)
+        winner_score    : 1.0 si A gagne, 0.0 si B gagne
+        k               : facteur d'ajustement (sensibilité)
+
+    Returns:
+        (nouveau_ra, nouveau_rb)
+    """
+    ea = _expected_score(ra, rb)
+    new_ra = ra + k * (winner_score - ea)
+    new_rb = rb + k * ((1.0 - winner_score) - (1.0 - ea))
+    return new_ra, new_rb
+
+
+# ── Fonction principale ────────────────────────────────────────────────────────
 
 def build_elo_per_season(
     regular_season_results: DataFrame,
     initial_rating: float = 1500.0,
     k_factor: float = 20.0,
 ) -> DataFrame:
-    """Compute final ELO rating per team per season (after all regular season games).
+    """
+    Calcule le rating ELO final de chaque équipe à la fin de la saison régulière.
 
-    Expected columns:
-    - Season, DayNum, WTeamID, LTeamID
+    Args:
+        regular_season_results : DataFrame Spark (Season, DayNum, WTeamID, LTeamID, ...)
+        initial_rating         : rating de départ de chaque équipe (défaut 1500)
+        k_factor               : amplitude des ajustements par match (défaut 20)
 
     Returns:
         DataFrame(Season:int, TeamID:int, Elo:double)
     """
-    # Ensure required columns exist (fail fast in jobs)
-    needed = {"Season", "DayNum", "WTeamID", "LTeamID"}
-    missing = needed - set(regular_season_results.columns)
+    missing = _REQUIRED - set(regular_season_results.columns)
     if missing:
-        raise ValueError(f"Missing required columns for ELO: {sorted(missing)}")
+        raise ValueError(f"[build_elo_per_season] Colonnes manquantes : {sorted(missing)}")
 
-    # We only need these columns and must sort games by day to avoid leakage inside season.
-    games = (regular_season_results
-             .select(
-                 F.col("Season").cast("int").alias("Season"),
-                 F.col("DayNum").cast("int").alias("DayNum"),
-                 F.col("WTeamID").cast("int").alias("WTeamID"),
-                 F.col("LTeamID").cast("int").alias("LTeamID"),
-             ))
+    # Sélection minimale — limite le shuffle entre workers
+    games = regular_season_results.select(
+        F.col("Season").cast("int"),
+        F.col("DayNum").cast("int"),
+        F.col("WTeamID").cast("int"),
+        F.col("LTeamID").cast("int"),
+    )
 
+    # Schéma de sortie déclaré pour le Pandas UDF
     schema = StructType([
-        StructField("Season", IntegerType(), False),
-        StructField("TeamID", IntegerType(), False),
-        StructField("Elo", DoubleType(), False),
+        StructField("Season", IntegerType(), nullable=False),
+        StructField("TeamID", IntegerType(), nullable=False),
+        StructField("Elo",    DoubleType(),  nullable=False),
     ])
 
-    def per_season(pdf_iter: Iterator[pd.DataFrame]) -> Iterator[pd.DataFrame]:
+    def _compute_season_elo(pdf_iter: Iterator[pd.DataFrame]) -> Iterator[pd.DataFrame]:
+        """
+        UDF Pandas appliquée par saison.
+        Les matchs sont triés chronologiquement avant traitement.
+        """
         for pdf in pdf_iter:
             if pdf.empty:
                 continue
+
             season = int(pdf["Season"].iloc[0])
+            # Tri stablement pour résultats reproductibles quand DayNum est égal
             pdf = pdf.sort_values("DayNum", kind="mergesort")
 
             ratings: dict[int, float] = {}
 
-            def get_rating(t: int) -> float:
-                return ratings.get(int(t), initial_rating)
-
             for _, row in pdf.iterrows():
-                w = int(row["WTeamID"])
-                l = int(row["LTeamID"])
-                rw = get_rating(w)
-                rl = get_rating(l)
-                # Winner score = 1
-                rw2, rl2 = _update(rw, rl, 1.0, k_factor)
-                ratings[w] = rw2
-                ratings[l] = rl2
+                winner = int(row["WTeamID"])
+                loser  = int(row["LTeamID"])
+                rw = ratings.get(winner, initial_rating)
+                rl = ratings.get(loser,  initial_rating)
+                ratings[winner], ratings[loser] = _update_ratings(rw, rl, 1.0, k_factor)
 
-            out = pd.DataFrame({
-                "Season": [season] * len(ratings),
+            yield pd.DataFrame({
+                "Season": season,
                 "TeamID": list(ratings.keys()),
-                "Elo": list(ratings.values()),
+                "Elo":    list(ratings.values()),
             })
-            yield out
 
-    return games.groupBy("Season").applyInPandas(per_season, schema=schema)
+    return games.groupBy("Season").applyInPandas(_compute_season_elo, schema=schema)

@@ -1,139 +1,91 @@
-"""Job 03 — Build Gold training dataset (matchups with features), league-aware.
+"""
+Job 03 — Gold : dataset d'entraînement ML
+══════════════════════════════════════════
+Assemble le dataset final pour le ML à partir des couches Silver :
+- Matchups étiquetés (victoire = 1 / défaite = 0) depuis la saison régulière
+- Deltas de features : WinRate, PointDiff, Elo, Rolling, Seed, Massey, SOS
 
-Gold is the ML-ready dataset:
-- label (Team1 win?)
-- feature deltas including:
-  - season aggregates (WinRateDiff, AvgPointDiffDiff)
-  - EloDiff
-  - Rolling diffs (filled later if desired)
-  - SeedDiff (if seeds available)
-  - MasseyDiff (Men only, if available)
-  - SOS diffs
+Les features optionnelles (Seed, Massey, SOS) sont mises à null si les jobs
+amont n'ont pas encore tourné — pas de crash, juste un avertissement.
 
-Outputs:
-- s3a://<bucket>/gold/march_mania/<league>/training_matchups/
+Config : conf/pipeline.yml → competition.league (M ou W)
 
-Run:
+Sortie : gold/march_mania/<league>/training_matchups/
+
+Usage :
     docker compose run --rm spark-submit python jobs/03_build_gold_training_set.py
 """
 
 import yaml
 from pyspark.sql import functions as F
 
-from src.common.spark import build_spark
-from src.common.paths import bronze_path, silver_path, gold_path
+from jobs.feature_helpers import attach_optional_features  # helper partagé
 from src.common.logging import get_logger
+from src.common.paths import bronze_path, gold_path, silver_path
+from src.common.spark import build_spark
 from src.features.basketball_features_plus import attach_team_features
 
 logger = get_logger(__name__)
 
 
-def main() -> None:
-    spark = build_spark("march-mania-03-gold")
-
-    cfg = yaml.safe_load(open("/opt/project/conf/pipeline.yml", "r", encoding="utf-8"))
+def _load_league(cfg_path: str = "/opt/project/conf/pipeline.yml") -> str:
+    cfg = yaml.safe_load(open(cfg_path, encoding="utf-8"))
     league = str(cfg.get("competition", {}).get("league", "M")).upper()
     if league not in {"M", "W"}:
-        raise ValueError("competition.league must be 'M' or 'W'")
+        raise ValueError(f"competition.league doit être 'M' ou 'W', reçu : {league!r}")
+    return league
 
-    bronze_ds = "m/regular_season/compact" if league == "M" else "w/regular_season/compact"
-    regular = spark.read.parquet(bronze_path(bronze_ds))
 
-    team_stats = spark.read.parquet(silver_path(f"{league}/team_season_stats"))
-    elo = spark.read.parquet(silver_path(f"{league}/elo_ratings"))
-    rolling_last = spark.read.parquet(silver_path(f"{league}/rolling_last_per_season"))
-
-    # Optional seeds
-    seeds_path = silver_path(f"{league}/tourney_seeds_parsed")
-    try:
-        seeds = spark.read.parquet(seeds_path)
-    except Exception:
-        seeds = None
-        logger.warning("Seeds not found at %s (run job 08). SeedDiff will be null.", seeds_path)
-
-    # Optional Massey (Men only)
-    massey = None
-    if league == "M":
-        massey_path = silver_path("M/massey_consensus")
-        try:
-            massey = spark.read.parquet(massey_path)
-        except Exception:
-            logger.warning("Massey consensus not found at %s (run job 09). MasseyDiff will be null.", massey_path)
-
-    # Optional SOS
-    sos_path = silver_path(f"{league}/strength_of_schedule")
-    try:
-        sos = spark.read.parquet(sos_path)
-    except Exception:
-        sos = None
-        logger.warning("SOS not found at %s (run job 10). SOS diffs will be null.", sos_path)
-
-    # Create labeled matchups
-    w = (
+def build_labeled_matchups(regular):
+    """
+    Crée un DataFrame de matchups avec étiquette binaire.
+    Chaque match génère 2 lignes : vainqueur (label=1) et perdant (label=0).
+    Cette symétrie aide le modèle à ne pas biaiser sur l'ordre des équipes.
+    """
+    winners = (
         regular.select(
-            F.col("Season").cast("int").alias("Season"),
+            F.col("Season").cast("int"),
             F.col("WTeamID").cast("int").alias("Team1"),
             F.col("LTeamID").cast("int").alias("Team2"),
         ).withColumn("label", F.lit(1))
     )
-    l = (
+    losers = (
         regular.select(
-            F.col("Season").cast("int").alias("Season"),
+            F.col("Season").cast("int"),
             F.col("LTeamID").cast("int").alias("Team1"),
             F.col("WTeamID").cast("int").alias("Team2"),
         ).withColumn("label", F.lit(0))
     )
-    matchups = w.unionByName(l)
+    # BUG FIX : la version originale utilisait 'l' (undefined) au lieu de 'losers'
+    return winners.unionByName(losers)
 
+
+def main() -> None:
+    spark = build_spark("march-mania-03-gold")
+    league = _load_league()
+
+    # ── Lecture des Silver requis ──────────────────────────────────────────────
+    bronze_ds = "m/regular_season/compact" if league == "M" else "w/regular_season/compact"
+    regular     = spark.read.parquet(bronze_path(bronze_ds))
+    team_stats  = spark.read.parquet(silver_path(f"{league}/team_season_stats"))
+    elo         = spark.read.parquet(silver_path(f"{league}/elo_ratings"))
+    rolling_last = spark.read.parquet(silver_path(f"{league}/rolling_last_per_season"))
+
+    # ── Construction du dataset ────────────────────────────────────────────────
+    matchups = build_labeled_matchups(regular)
     feats = attach_team_features(matchups, team_stats, elo, rolling_last)
 
-    # Seeds diff
-    if seeds is not None:
-        t1_seed = seeds.select("Season", F.col("TeamID").alias("Team1"), F.col("SeedNum").alias("T1_SeedNum"))
-        t2_seed = seeds.select("Season", F.col("TeamID").alias("Team2"), F.col("SeedNum").alias("T2_SeedNum"))
-        feats = (feats
-                 .join(t1_seed, on=["Season", "Team1"], how="left")
-                 .join(t2_seed, on=["Season", "Team2"], how="left")
-                 .withColumn("SeedDiff", F.col("T1_SeedNum") - F.col("T2_SeedNum")))
-    else:
-        feats = feats.withColumn("SeedDiff", F.lit(None).cast("double"))
+    # Features optionnelles (Seeds, Massey, SOS) via helper centralisé
+    feats = attach_optional_features(feats, league, spark)
 
-    # Massey diff (Men)
-    if massey is not None:
-        t1_m = massey.select("Season", F.col("TeamID").alias("Team1"), F.col("MasseyMeanRank").alias("T1_Massey"))
-        t2_m = massey.select("Season", F.col("TeamID").alias("Team2"), F.col("MasseyMeanRank").alias("T2_Massey"))
-        feats = (feats
-                 .join(t1_m, on=["Season", "Team1"], how="left")
-                 .join(t2_m, on=["Season", "Team2"], how="left")
-                 .withColumn("MasseyDiff", F.col("T1_Massey") - F.col("T2_Massey")))
-    else:
-        feats = feats.withColumn("MasseyDiff", F.lit(None).cast("double"))
-
-    # SOS diffs
-    if sos is not None:
-        t1_s = sos.select("Season", F.col("TeamID").alias("Team1"),
-                          F.col("SOS_OppWinRate").alias("T1_SOS_OppWinRate"),
-                          F.col("SOS_OppElo").alias("T1_SOS_OppElo"))
-        t2_s = sos.select("Season", F.col("TeamID").alias("Team2"),
-                          F.col("SOS_OppWinRate").alias("T2_SOS_OppWinRate"),
-                          F.col("SOS_OppElo").alias("T2_SOS_OppElo"))
-        feats = (feats
-                 .join(t1_s, on=["Season", "Team1"], how="left")
-                 .join(t2_s, on=["Season", "Team2"], how="left")
-                 .withColumn("SOSWinRateDiff", F.col("T1_SOS_OppWinRate") - F.col("T2_SOS_OppWinRate"))
-                 .withColumn("SOSEloDiff", F.col("T1_SOS_OppElo") - F.col("T2_SOS_OppElo")))
-    else:
-        feats = (feats
-                 .withColumn("SOSWinRateDiff", F.lit(None).cast("double"))
-                 .withColumn("SOSEloDiff", F.lit(None).cast("double")))
-
+    # Supprimer les lignes sans features essentielles (équipes sans stats Silver)
     feats = feats.dropna(subset=["WinRateDiff", "AvgPointDiffDiff", "EloDiff"])
 
     out_path = gold_path(f"{league}/training_matchups")
-    logger.info("Writing Gold training set: %s", out_path)
+    logger.info("Écriture Gold dataset : %s", out_path)
     feats.write.mode("overwrite").parquet(out_path)
 
-    logger.info("Gold dataset complete. league=%s rows=%d", league, feats.count())
+    logger.info("Gold terminé — league=%s lignes=%d", league, feats.count())
 
 
 if __name__ == "__main__":

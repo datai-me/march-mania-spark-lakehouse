@@ -1,114 +1,178 @@
-version: "3.9"
+# ══════════════════════════════════════════════════════════════════════════════
+# March Mania — Docker Compose (Lakehouse : MinIO + Spark 4)
+#
+# Démarrage rapide :
+#   cp .env.example .env        # configurer les credentials
+#   docker compose up -d        # démarrer MinIO + Spark master/worker
+#   docker compose run --rm spark-submit jobs/01_ingest_bronze.py
+#
+# Variables d'environnement (via .env ou shell) :
+#   MINIO_ROOT_USER     défaut : admin
+#   MINIO_ROOT_PASSWORD défaut : admin123
+#   MINIO_BUCKET        défaut : kaggle-lake
+#   TZ                  défaut : Indian/Antananarivo
+# ══════════════════════════════════════════════════════════════════════════════
 
+# ── Ancres YAML ───────────────────────────────────────────────────────────────
+# Évitent de répéter les mêmes volumes dans master, worker et submit.
+x-spark-volumes: &spark-volumes
+  volumes:
+    - ./jobs:/opt/project/jobs:ro
+    - ./src:/opt/project/src:ro
+    - ./conf:/opt/project/conf:ro
+    - ./data:/opt/project/data          # lecture/écriture : données locales
+    - ./artifacts:/opt/project/artifacts # lecture/écriture : modèles + soumissions
+
+x-spark-build: &spark-build
+  build:
+    context: .
+    dockerfile: Dockerfile.spark
+
+x-spark-network: &spark-network
+  networks:
+    - lakehouse
+
+x-minio-env: &minio-env
+  MINIO_ROOT_USER:     ${MINIO_ROOT_USER:-admin}
+  MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-admin123}
+
+# ── Services ──────────────────────────────────────────────────────────────────
 services:
+
+  # ── MinIO : stockage objet S3-compatible (couches Bronze / Silver / Gold) ──
   minio:
     image: minio/minio:latest
     container_name: minio
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-admin}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-admin123}
+      <<: *minio-env
     command: server /data --console-address ":9001"
     ports:
-      - "9000:9000"   # S3 API
-      - "9001:9001"   # Console UI
+      - "9000:9000"   # API S3
+      - "9001:9001"   # Console Web → http://localhost:9001
     volumes:
       - minio_data:/data
-    networks:
-      - lakehouse
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    <<: *spark-network
 
-  # One-shot init container: create bucket if missing.
-  minio-mc:
+  # ── MinIO MC : initialisation du bucket au démarrage ──────────────────────
+  minio-init:
     image: minio/mc:latest
-    container_name: minio-mc
+    container_name: minio-init
     depends_on:
-      - minio
-    networks:
-      - lakehouse
+      minio:
+        condition: service_healthy
+    <<: *spark-network
     entrypoint: >
       /bin/sh -c "
-      until (/usr/bin/mc alias set local http://minio:9000 ${MINIO_ROOT_USER:-admin} ${MINIO_ROOT_PASSWORD:-admin123}); do
-        echo 'waiting for minio...' && sleep 2;
-      done;
-      /usr/bin/mc mb --ignore-existing local/${MINIO_BUCKET:-kaggle-lake};
-      /usr/bin/mc anonymous set none local/${MINIO_BUCKET:-kaggle-lake};
-      echo 'MinIO bucket ready.';
+        mc alias set local http://minio:9000 ${MINIO_ROOT_USER:-admin} ${MINIO_ROOT_PASSWORD:-admin123} &&
+        mc mb --ignore-existing local/${MINIO_BUCKET:-kaggle-lake} &&
+        mc anonymous set none local/${MINIO_BUCKET:-kaggle-lake} &&
+        echo '✅ Bucket ${MINIO_BUCKET:-kaggle-lake} prêt.'
       "
+    # Ce conteneur se termine après init — comportement attendu.
 
+  # ── Spark Master ──────────────────────────────────────────────────────────
   spark-master:
-    image: apache/spark:4.0.2-scala2.13-java17-python3-r-ubuntu
+    <<: [*spark-build, *spark-volumes, *spark-network]
     container_name: spark-master
     environment:
-      - SPARK_MODE=master
-      - SPARK_MASTER_HOST=spark-master
-      - TZ=${TZ:-Indian/Antananarivo}
-    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master", "--host", "spark-master", "--port", "7077", "--webui-port", "8080"]
+      SPARK_MODE:       master
+      SPARK_MASTER_HOST: spark-master
+      TZ: ${TZ:-Indian/Antananarivo}
+    command:
+      - /opt/spark/bin/spark-class
+      - org.apache.spark.deploy.master.Master
+      - --host
+      - spark-master
+      - --port
+      - "7077"
+      - --webui-port
+      - "8080"
     ports:
-      - "7077:7077"
-      - "8080:8080"
-    volumes:
-      - ./jobs:/opt/project/jobs:ro
-      - ./src:/opt/project/src:ro
-      - ./data:/opt/project/data
-      - ./artifacts:/opt/project/artifacts
-      - ./conf:/opt/project/conf:ro
-    networks:
-      - lakehouse
+      - "7077:7077"   # port Spark interne
+      - "8080:8080"   # Spark Master UI → http://localhost:8080
 
+  # ── Spark Worker ──────────────────────────────────────────────────────────
   spark-worker-1:
-    image: apache/spark:4.0.2-scala2.13-java17-python3-r-ubuntu
+    <<: [*spark-build, *spark-volumes, *spark-network]
     container_name: spark-worker-1
     depends_on:
       - spark-master
     environment:
-      - SPARK_MODE=worker
-      - SPARK_MASTER_URL=spark://spark-master:7077
-      - TZ=${TZ:-Indian/Antananarivo}
-    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker", "spark://spark-master:7077", "--webui-port", "8081"]
+      SPARK_MODE:       worker
+      SPARK_MASTER_URL: spark://spark-master:7077
+      TZ: ${TZ:-Indian/Antananarivo}
+    command:
+      - /opt/spark/bin/spark-class
+      - org.apache.spark.deploy.worker.Worker
+      - spark://spark-master:7077
+      - --webui-port
+      - "8081"
     ports:
-      - "8081:8081"
-    volumes:
-      - ./jobs:/opt/project/jobs:ro
-      - ./src:/opt/project/src:ro
-      - ./data:/opt/project/data
-      - ./artifacts:/opt/project/artifacts
-      - ./conf:/opt/project/conf:ro
-    networks:
-      - lakehouse
+      - "8081:8081"   # Spark Worker UI → http://localhost:8081
 
-  # Ephemeral container used to run jobs (spark-submit). It connects to the master.
+  # ── Spark Submit : runner des jobs du pipeline ────────────────────────────
+  # Usage : docker compose run --rm spark-submit jobs/01_ingest_bronze.py
   spark-submit:
-    image: apache/spark:4.0.2-scala2.13-java17-python3-r-ubuntu
-    container_name: spark-submit
+    <<: [*spark-build, *spark-volumes, *spark-network]
     depends_on:
       - spark-master
-      - minio
+      - minio-init
     environment:
-      - TZ=${TZ:-Indian/Antananarivo}
-      # MinIO / S3A settings used by our SparkSession factory too (kept for clarity)
-      - MINIO_ENDPOINT=http://minio:9000
-      - MINIO_ACCESS_KEY=${MINIO_ROOT_USER:-admin}
-      - MINIO_SECRET_KEY=${MINIO_ROOT_PASSWORD:-admin123}
-      - MINIO_BUCKET=${MINIO_BUCKET:-kaggle-lake}
+      TZ:              ${TZ:-Indian/Antananarivo}
+      PYTHONPATH:      /opt/project
+      MINIO_ENDPOINT:  http://minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-admin}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-admin123}
+      MINIO_BUCKET:    ${MINIO_BUCKET:-kaggle-lake}
     working_dir: /opt/project
-    entrypoint: ["/bin/bash", "-lc"]
-    command: >
-      "/opt/spark/bin/spark-submit
-       --master spark://spark-master:7077
-       --conf spark.driver.extraJavaOptions=-Dlog4j.configurationFile=/opt/project/conf/log4j2.properties
-       --conf spark.executor.extraJavaOptions=-Dlog4j.configurationFile=/opt/project/conf/log4j2.properties
-       --py-files /opt/project/src
-       jobs/01_ingest_bronze.py"
-    volumes:
-      - ./jobs:/opt/project/jobs:ro
-      - ./src:/opt/project/src:ro
-      - ./data:/opt/project/data
-      - ./artifacts:/opt/project/artifacts
-      - ./conf:/opt/project/conf:ro
-    networks:
-      - lakehouse
+    entrypoint: ["/opt/spark/bin/spark-submit"]
+    command:
+      # Cluster Spark
+      - --master
+      - spark://spark-master:7077
 
+      # S3A → MinIO (accès path-style requis pour MinIO)
+      - --conf
+      - spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem
+      - --conf
+      - spark.hadoop.fs.s3a.path.style.access=true
+      - --conf
+      - spark.hadoop.fs.s3a.endpoint=http://minio:9000
+      - --conf
+      - spark.hadoop.fs.s3a.access.key=${MINIO_ROOT_USER:-admin}
+      - --conf
+      - spark.hadoop.fs.s3a.secret.key=${MINIO_ROOT_PASSWORD:-admin123}
+      - --conf
+      - spark.hadoop.fs.s3a.connection.ssl.enabled=false
+
+      # Python 3.12 explicite (évite de prendre un Python système différent)
+      - --conf
+      - spark.pyspark.python=python
+      - --conf
+      - spark.pyspark.driver.python=python
+      - --conf
+      - spark.executorEnv.PYTHONPATH=/opt/project
+
+      # Logging structuré
+      - --conf
+      - spark.driver.extraJavaOptions=-Dlog4j.configurationFile=/opt/project/conf/log4j2.properties
+      - --conf
+      - spark.executor.extraJavaOptions=-Dlog4j.configurationFile=/opt/project/conf/log4j2.properties
+
+      # Embarque le code src/ dans les exécuteurs
+      - --py-files
+      - /opt/project/src
+
+# ── Réseau & Volumes ──────────────────────────────────────────────────────────
 networks:
   lakehouse:
+    driver: bridge
 
 volumes:
   minio_data:
+    driver: local

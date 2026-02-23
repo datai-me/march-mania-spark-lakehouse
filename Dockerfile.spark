@@ -1,0 +1,45 @@
+FROM python:3.12-slim
+
+# ── Dépendances système ────────────────────────────────────────────────────────
+# Debian Trixie (base de python:3.12-slim) ne fournit plus Java 17 → on utilise 21.
+# Spark 4.x est compatible Java 21.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    openjdk-21-jre-headless \
+    curl \
+    ca-certificates \
+    bash \
+  && rm -rf /var/lib/apt/lists/*
+
+ENV JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64
+ENV SPARK_HOME=/opt/spark
+ENV PATH="${SPARK_HOME}/bin:${SPARK_HOME}/sbin:${PATH}"
+
+# ── Spark 4.1.1 précompilé ────────────────────────────────────────────────────
+# 4.1.1 = release de maintenance (correctifs sécurité + stabilité) recommandée
+# par Apache pour tous les utilisateurs 4.1.x.
+# Téléchargé depuis le serveur officiel Apache (accès internet requis au build).
+RUN mkdir -p /opt \
+ && curl -L --fail -o /tmp/spark.tgz \
+    https://downloads.apache.org/spark/spark-4.1.1/spark-4.1.1-bin-hadoop3.tgz \
+ && tar -xzf /tmp/spark.tgz -C /opt \
+ && mv /opt/spark-4.1.1-bin-hadoop3 /opt/spark \
+ && rm -f /tmp/spark.tgz
+
+# ── Dépendances Python ────────────────────────────────────────────────────────
+WORKDIR /opt/project
+COPY requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip \
+ && pip install --no-cache-dir -r requirements.txt
+
+# PySpark doit utiliser le même Python que le driver
+ENV PYSPARK_PYTHON=python \
+    PYSPARK_DRIVER_PYTHON=python
+
+# ── JARs S3A pour accès MinIO (S3-compatible) ─────────────────────────────────
+# hadoop-aws + AWS SDK v2 (bundle) + client HTTP léger
+# Versions épinglées pour reproductibilité.
+COPY jars/hadoop-aws-3.4.1.jar         /opt/spark/jars/
+COPY jars/bundle-2.41.32.jar           /opt/spark/jars/
+COPY jars/url-connection-client-2.41.32.jar /opt/spark/jars/
+
+WORKDIR /opt/project

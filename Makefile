@@ -1,56 +1,103 @@
-SHELL := /bin/bash
+# ══════════════════════════════════════════════════════════════════════════════
+# March Mania — Makefile
+#
+# Centralise toutes les commandes du projet pour Docker ET local.
+# Usage : make <cible>
+#
+# Prérequis Docker : Docker Desktop + docker compose
+# Prérequis local  : Python 3.12 + Spark installé + SPARK_HOME défini
+# ══════════════════════════════════════════════════════════════════════════════
 
+DOCKER_SUBMIT = docker compose run --rm spark-submit
+PYTHON        = python
+PIPELINE      = jobs/run_pipeline.py
+
+# ── Infrastructure ─────────────────────────────────────────────────────────────
+
+## Démarre MinIO + Spark master/worker en arrière-plan
 up:
-	docker compose up -d
+	docker compose up -d minio minio-init spark-master spark-worker-1
+	@echo "✅  Cluster démarré. UIs :"
+	@echo "    Spark   → http://localhost:8080"
+	@echo "    MinIO   → http://localhost:9001"
 
+## Arrête et supprime les conteneurs (conserve les données MinIO)
 down:
+	docker compose down
+
+## Arrête + supprime TOUT (conteneurs + volume MinIO → données perdues)
+clean:
 	docker compose down -v
+	@echo "⚠️  Volume MinIO supprimé."
 
+## Reconstruit les images Spark (après modif du Dockerfile ou requirements.txt)
+build:
+	docker compose build --no-cache spark-master spark-worker-1 spark-submit
+
+## Affiche les logs du cluster en temps réel
 logs:
-	docker compose logs -f --tail=200
+	docker compose logs -f spark-master spark-worker-1
 
-bronze:
-	docker compose run --rm spark-submit python jobs/01_ingest_bronze.py
 
-silver:
-	docker compose run --rm spark-submit python jobs/02_build_silver_features.py
+# ── Pipeline complet (Docker) ──────────────────────────────────────────────────
 
-gold:
-	docker compose run --rm spark-submit python jobs/03_build_gold_training_set.py
-
-all: bronze silver gold
-
-train:
-	docker compose run --rm spark-submit python jobs/04_train_and_export_submission.py
-
-submit: train
-
-elo:
-	docker compose run --rm spark-submit python jobs/05_build_silver_elo.py
-
-rolling:
-	docker compose run --rm spark-submit python jobs/06_build_silver_rolling.py
-
-expert:
-	docker compose run --rm spark-submit python jobs/07_backtest_and_export_blend.py
-
-seeds:
-	docker compose run --rm spark-submit python jobs/08_build_silver_seeds.py
-
-massey:
-	docker compose run --rm spark-submit python jobs/09_build_silver_massey.py
-
-sos:
-	docker compose run --rm spark-submit python jobs/10_build_silver_sos.py
-
-expert2:
-	docker compose run --rm spark-submit python jobs/07_backtest_and_export_blend.py
-
-hpo:
-	docker compose run --rm spark-submit python jobs/11_hpo_backtest.py
-
-ensemble:
-	docker compose run --rm spark-submit python jobs/12_train_ensemble_export.py
-
+## Lance le pipeline complet Bronze → Gold → HPO → Ensemble (Docker)
 full:
-	docker compose run --rm spark-submit python jobs/07_backtest_and_export_blend.py
+	$(DOCKER_SUBMIT) $(PIPELINE) 1 12
+
+## Ingestion Bronze uniquement
+bronze:
+	$(DOCKER_SUBMIT) $(PIPELINE) 1 1
+
+## Silver complet (features, ELO, rolling, seeds, massey, SOS)
+silver:
+	$(DOCKER_SUBMIT) $(PIPELINE) 2 2
+	$(DOCKER_SUBMIT) $(PIPELINE) 5 10
+
+## Gold dataset
+gold:
+	$(DOCKER_SUBMIT) $(PIPELINE) 3 3
+
+## HPO + ensemble
+ensemble:
+	$(DOCKER_SUBMIT) $(PIPELINE) 11 12
+
+## Backtest expert + soumission
+expert:
+	$(DOCKER_SUBMIT) $(PIPELINE) 7 7
+
+
+# ── Pipeline local (sans Docker) ──────────────────────────────────────────────
+# Nécessite : SPARK_HOME défini + MinIO accessible ou mode fichier local
+
+## Lance le pipeline complet en local
+local-full:
+	$(PYTHON) $(PIPELINE) 1 12
+
+## Lance un job spécifique en local (usage : make local-job JOB=3)
+local-job:
+	$(PYTHON) $(PIPELINE) $(JOB)
+
+## Installe les dépendances Python localement
+install:
+	pip install -r requirements.txt
+
+
+# ── Utilitaires ───────────────────────────────────────────────────────────────
+
+## Liste les jobs disponibles
+jobs:
+	$(PYTHON) $(PIPELINE)
+
+## Vérification syntaxe Python (tous les jobs)
+lint:
+	$(PYTHON) -m py_compile jobs/*.py src/**/*.py
+	@echo "✅  Aucune erreur de syntaxe."
+
+## Crée les dossiers nécessaires (à faire avant le premier run)
+init-dirs:
+	mkdir -p data/input artifacts conf jars
+	@echo "✅  Dossiers créés : data/input/, artifacts/, conf/, jars/"
+
+.PHONY: up down clean build logs full bronze silver gold ensemble expert \
+        local-full local-job install jobs lint init-dirs
